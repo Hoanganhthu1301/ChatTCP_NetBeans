@@ -9,7 +9,6 @@ package server;
  * @author hoang
  */
 
-
 import java.sql.*;
 import java.util.ArrayList;
 import java.util.List;
@@ -17,7 +16,8 @@ import java.util.List;
 public class ConversationService {
 
     public long getAllConversationId() throws Exception {
-        String sql = "SELECT TOP 1 ConversationId FROM dbo.Conversations WHERE ConversationType='GROUP' AND Title=N'ALL'";
+        String sql = "SELECT TOP 1 ConversationId FROM dbo.Conversations " +
+                     "WHERE ConversationType='GROUP' AND Title=N'ALL'";
         try (Connection c = Db.getConnection();
              PreparedStatement ps = c.prepareStatement(sql);
              ResultSet rs = ps.executeQuery()) {
@@ -30,13 +30,17 @@ public class ConversationService {
         String sql =
             "IF NOT EXISTS (SELECT 1 FROM dbo.ConversationMembers WHERE ConversationId=? AND UserId=?) " +
             "INSERT INTO dbo.ConversationMembers(ConversationId, UserId, IsAdmin) VALUES (?,?,?)";
+
         try (Connection c = Db.getConnection();
              PreparedStatement ps = c.prepareStatement(sql)) {
+
+            // ✅ đúng thứ tự param
             ps.setLong(1, convId);
             ps.setInt(2, userId);
             ps.setLong(3, convId);
             ps.setInt(4, userId);
             ps.setBoolean(5, isAdmin);
+
             ps.executeUpdate();
         }
     }
@@ -48,6 +52,7 @@ public class ConversationService {
             "JOIN dbo.ConversationMembers m1 ON m1.ConversationId=c.ConversationId AND m1.UserId=? " +
             "JOIN dbo.ConversationMembers m2 ON m2.ConversationId=c.ConversationId AND m2.UserId=? " +
             "WHERE c.ConversationType='DIRECT'";
+
         try (Connection c = Db.getConnection();
              PreparedStatement ps = c.prepareStatement(find)) {
             ps.setInt(1, userA);
@@ -57,17 +62,22 @@ public class ConversationService {
             }
         }
 
+        // ✅ tạo DIRECT conv, lấy id
         String create =
-            "INSERT INTO dbo.Conversations(ConversationType, Title, CreatedByUserId) VALUES('DIRECT', NULL, ?); " +
+            "INSERT INTO dbo.Conversations(ConversationType, Title, CreatedByUserId) " +
+            "VALUES('DIRECT', NULL, ?); " +
             "SELECT SCOPE_IDENTITY();";
+
         try (Connection c = Db.getConnection();
              PreparedStatement ps = c.prepareStatement(create)) {
             ps.setInt(1, createdByUserId);
             try (ResultSet rs = ps.executeQuery()) {
                 rs.next();
                 long convId = ((Number) rs.getObject(1)).longValue();
+
                 addMemberIfNotExists(convId, userA, false);
                 addMemberIfNotExists(convId, userB, false);
+
                 return convId;
             }
         }
@@ -80,6 +90,7 @@ public class ConversationService {
             "FROM dbo.ConversationMembers cm " +
             "JOIN dbo.Users u ON u.UserId=cm.UserId " +
             "WHERE cm.ConversationId=?";
+
         try (Connection c = Db.getConnection();
              PreparedStatement ps = c.prepareStatement(sql)) {
             ps.setLong(1, convId);
@@ -89,37 +100,24 @@ public class ConversationService {
         }
         return list;
     }
-    public long createGroupConversation(String groupName, int createdByUserId) throws Exception {
-    // Tạo 1 conversation type GROUP và add creator vào members
-    // Tùy schema Conversation của mày, tao giả định có bảng Conversations + ConversationMembers
-    // Nếu tên cột khác, mày gửi schema tao map lại đúng 100%.
 
-    try (var c = Db.getConnection()) {
+    // ✅ FIX: tạo GROUP conversation theo kiểu SCOPE_IDENTITY (không dùng conn field)
+    public long createGroupConversation(String title, int createdByUserId) throws Exception {
+        String sql =
+            "INSERT INTO dbo.Conversations(ConversationType, Title, CreatedByUserId) " +
+            "VALUES('GROUP', ?, ?); " +
+            "SELECT SCOPE_IDENTITY();";
 
-        long convId;
-        try (var ps = c.prepareStatement(
-                "INSERT INTO dbo.Conversations(Type, Title, CreatedBy) VALUES('GROUP', ?, ?)",
-                java.sql.Statement.RETURN_GENERATED_KEYS
-        )) {
-            ps.setString(1, groupName);
+        try (Connection c = Db.getConnection();
+             PreparedStatement ps = c.prepareStatement(sql)) {
+
+            ps.setString(1, title);
             ps.setInt(2, createdByUserId);
-            ps.executeUpdate();
-            try (var rs = ps.getGeneratedKeys()) {
+
+            try (ResultSet rs = ps.executeQuery()) {
                 rs.next();
-                convId = rs.getLong(1);
+                return ((Number) rs.getObject(1)).longValue();
             }
         }
-
-        try (var ps = c.prepareStatement(
-                "INSERT INTO dbo.ConversationMembers(ConversationId, UserId, IsOwner) VALUES(?,?,1)"
-        )) {
-            ps.setLong(1, convId);
-            ps.setInt(2, createdByUserId);
-            ps.executeUpdate();
-        }
-
-        return convId;
     }
-}
-
 }

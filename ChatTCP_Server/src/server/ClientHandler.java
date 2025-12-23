@@ -8,11 +8,11 @@ package server;
  *
  * @author hoang
  */
-
-
+import java.sql.*;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.net.Socket;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -41,7 +41,7 @@ public class ClientHandler extends Thread {
     // online users
     public static final ConcurrentHashMap<String, ClientHandler> onlineUsers = new ConcurrentHashMap<>();
 
-    // ===== GROUP in-memory demo =====
+    // ===== GROUP in-memory demo (chỉ để hiển thị list nhanh) =====
     static class Group {
         final String id;
         final String name;
@@ -56,6 +56,10 @@ public class ClientHandler extends Thread {
         this.in = new DataInputStream(socket.getInputStream());
         this.out = new DataOutputStream(socket.getOutputStream());
     }
+    EmailService mail = new EmailService(
+    "tn1301000@gmail.com",
+    "askrdtpjiinwbuyd"
+);
 
     @Override
     public void run() {
@@ -64,25 +68,69 @@ public class ClientHandler extends Thread {
             // 1) AUTH LOOP
             // =========================
             while (true) {
-                String cmd = in.readUTF(); // REGISTER|u|p or LOGIN|u|p
-                String[] p = cmd.split("\\|", 3);
+                String cmd = in.readUTF();
+                String[] p = cmd.split("\\|");
+                if (p.length == 0) continue;
 
-                if (p.length < 3) {
-                    send("ERR|Use REGISTER|user|pass or LOGIN|user|pass");
+                String op = p[0].trim().toUpperCase();
+
+                // ===== REGISTER (new): REGISTER|username|email|password =====
+                if ("REGISTER".equals(op)) {
+                    if (p.length < 4) {
+                        send("ERR|REGISTER_NEED_EMAIL");
+                        continue;
+                    }
+                    String u = p[1].trim();
+                    String email = p[2].trim();
+                    String pass = p[3];
+                    boolean ok = userService.register(u, email, pass);
+                    send(ok ? "OK|REGISTER" : "ERR|USERNAME_OR_EMAIL_EXISTS");
                     continue;
                 }
 
-                String op = p[0];
-                String u = p[1].trim();
-                String pass = p[2];
+                // ===== FORGOT =====
+                if ("FORGOT_REQ".equals(op)) {
+                    if (p.length < 2) { send("ERR|Bad FORGOT_REQ"); continue; }
+                    String email = p[1].trim();
+                    String otp = userService.createResetOtp(email);
+                    if (otp == null) { send("ERR|EMAIL_NOT_FOUND"); continue; }
 
-                if ("REGISTER".equalsIgnoreCase(op)) {
-                    boolean ok = userService.register(u, pass);
-                    send(ok ? "OK|REGISTER" : "ERR|Username exists");
+                    // send mail. nếu fail -> fallback trả otp
+                    try {
+                        System.out.println("[FORGOT] email=" + email);
+                        System.out.println("[FORGOT] Mail enabled=" + MailConfig.enabled());
+                        System.out.println("[FORGOT] From=" + MailConfig.fromEmail());
+
+                        if (!MailConfig.enabled()) throw new RuntimeException("Mail config missing");
+
+                        EmailService es = new EmailService(MailConfig.fromEmail(), MailConfig.appPassword());
+
+                        es.sendOtp(email, email, otp);
+
+                        send("OK|FORGOT_REQ|EMAIL_SENT");
+                    } catch (Exception ex) {
+                        System.out.println("[MAIL] SEND FAIL: " + ex);
+                        ex.printStackTrace(); // <<< CỰC QUAN TRỌNG: có cái này mới biết vì sao fail
+                        send("OK|FORGOT_REQ|OTP|" + otp); // fallback giữ nguyên
+                    }
+
+                    continue;
+                }
+                if ("FORGOT_CONFIRM".equals(op)) {
+                    if (p.length < 4) { send("ERR|Bad FORGOT_CONFIRM"); continue; }
+                    String email = p[1].trim();
+                    String otp = p[2].trim();
+                    String newPass = p[3];
+                    boolean ok = userService.confirmReset(email, otp, newPass);
+                    send(ok ? "OK|FORGOT_CONFIRM" : "ERR|OTP_INVALID");
                     continue;
                 }
 
-                if ("LOGIN".equalsIgnoreCase(op)) {
+                // ===== LOGIN: LOGIN|username|password =====
+                if ("LOGIN".equals(op)) {
+                    if (p.length < 3) { send("ERR|Bad LOGIN"); continue; }
+                    String u = p[1].trim();
+                    String pass = p[2];
                     int uid = userService.login(u, pass);
                     if (uid < 0) {
                         send("ERR|Wrong user/pass");
@@ -154,94 +202,102 @@ public class ClientHandler extends Thread {
             cleanup();
         }
     }
+
     private void handleSendToAttachment(String raw) throws Exception {
-    // FILETO|ALL|fileName|size|mime
-    // FILETO|USER|toUser|fileName|size|mime
-    // FILETO|GROUP|gid|fileName|size|mime
-    String[] p = raw.split("\\|", 6);
-    if (p.length < 5) { send("ERR|Bad FILETO/IMAGETO"); return; }
+        // FILETO|ALL|fileName|size|mime
+        // FILETO|USER|toUser|fileName|size|mime
+        // FILETO|GROUP|gid|fileName|size|mime
+        String[] p = raw.split("\\|", 6);
+        if (p.length < 5) { send("ERR|Bad FILETO/IMAGETO"); return; }
 
-    boolean isImage = p[0].equals("IMAGETO");
-    String scope = p[1];
+        boolean isImage = p[0].equals("IMAGETO");
+        String scope = p[1];
 
-    long convId;
-    if ("ALL".equals(scope)) {
-        convId = convService.getAllConversationId();
-        convService.addMemberIfNotExists(convId, userId, false);
-    } else if ("USER".equals(scope)) {
-        if (p.length < 6) { send("ERR|Bad USER FILETO"); return; }
-        String toUser = p[2].trim();
-        int targetId = userService.getUserIdByUsername(toUser);
-        if (targetId < 0) { send("ERR|User not found"); return; }
+        long convId;
+        String gidForGroup = null;
 
-        // block DM
-        if (blockService.isBlocked(userId, targetId)) { send("ERR|BLOCKED|You blocked this user"); return; }
-        if (blockService.isBlocked(targetId, userId)) { send("ERR|BLOCKED|You are blocked by this user"); return; }
+        if ("ALL".equals(scope)) {
+            convId = convService.getAllConversationId();
+            convService.addMemberIfNotExists(convId, userId, false);
 
-        convId = convService.getOrCreateDirectConversation(userId, targetId, userId);
-    } else if ("GROUP".equals(scope)) {
-        if (p.length < 6) { send("ERR|Bad GROUP FILETO"); return; }
-        String gid = p[2].trim();
-        Group g = groups.get(gid);
-        if (g == null) { send("ERR|Group not found"); return; }
-        if (!g.members.contains(username)) { send("ERR|Not a member"); return; }
+        } else if ("USER".equals(scope)) {
+            if (p.length < 6) { send("ERR|Bad USER FILETO"); return; }
+            String toUser = p[2].trim();
+            int targetId = userService.getUserIdByUsername(toUser);
+            if (targetId < 0) { send("ERR|User not found"); return; }
 
-        // group in-memory => tạo conv giả: dùng hash gid (tạm). Nếu mày có group conv DB thì lấy đúng convId.
-        // Tạm demo: lưu file kiểu broadcast không lưu DB message.
-        convId = -1;
-    } else {
-        send("ERR|Scope not supported");
-        return;
-    }
+            // block DM
+            if (blockService.isBlocked(userId, targetId)) { send("ERR|BLOCKED|You blocked this user"); return; }
+            if (blockService.isBlocked(targetId, userId)) { send("ERR|BLOCKED|You are blocked by this user"); return; }
 
-    String fileName = p[p.length - 3];
-    int size = Integer.parseInt(p[p.length - 2]);
-    String mime = p[p.length - 1];
+            convId = convService.getOrCreateDirectConversation(userId, targetId, userId);
 
-    byte[] data = new byte[size];
-    in.readFully(data);
+        } else if ("GROUP".equals(scope)) {
+            if (p.length < 6) { send("ERR|Bad GROUP FILETO"); return; }
+            gidForGroup = p[2].trim();
 
-    // nếu GROUP in-memory: chỉ broadcast file cho member online (không lưu DB)
-    if ("GROUP".equals(scope)) {
-        String gid = p[2].trim();
-        Group g = groups.get(gid);
+            Long c = msgService.getGroupConvId(gidForGroup);
+            if (c == null) { send("ERR|Group not found"); return; }
+            convId = c;
 
-        for (String mem : g.members) {
-            ClientHandler h = onlineUsers.get(mem);
+            // check membership DB (không phụ thuộc in-memory)
+            if (!msgService.isUserInGroup(userId, gidForGroup)) { send("ERR|Not a member"); return; }
+
+        } else {
+            send("ERR|Scope not supported");
+            return;
+        }
+
+        String fileName = p[p.length - 3];
+        int size = Integer.parseInt(p[p.length - 2]);
+        String mime = p[p.length - 1];
+
+        byte[] data = new byte[size];
+        in.readFully(data);
+
+        String type = isImage ? "IMAGE" : "FILE";
+
+        // ===== LƯU DB (tất cả: ALL/USER/GROUP) =====
+        String storagePath = FileUtil.saveBytesToUploads(fileName, data);
+        byte[] hash = FileUtil.sha256(data);
+
+        msgService.saveMessage(convId, userId, type, fileName);
+
+// ✅ lấy messageId mới nhất của conversation (cần 1 hàm nhỏ)
+        long messageId = msgService.getLastMessageId(convId, userId);
+        attService.saveAttachment(messageId, fileName, mime, size, storagePath, hash);
+
+
+        // ===== realtime: gửi theo members =====
+        if ("GROUP".equals(scope)) {
+            // members theo DB
+            List<String> members = msgService.listGroupMemberUsernames(gidForGroup);
+            for (String u : members) {
+                ClientHandler h = onlineUsers.get(u);
+                if (h == null) continue;
+
+                String head = type + "_INCOMING|GROUP|" + gidForGroup + "|" + username + "|" + fileName + "|" + size + "|" + mime;
+                h.send(head);
+                h.out.write(data);
+                h.out.flush();
+            }
+            send("OK|SENT|" + type + "|" + fileName);
+            return;
+        }
+
+        // ALL/USER: theo conv members
+        List<String> members = convService.listMemberUsernames(convId);
+        for (String u : members) {
+            ClientHandler h = onlineUsers.get(u);
             if (h == null) continue;
 
-            String head = (isImage ? "IMAGE_INCOMING" : "FILE_INCOMING")
-                    + "|" + gid + "|" + username + "|" + fileName + "|" + size + "|" + mime;
-            h.send(head);
+            h.send(type + "_INCOMING|" + convId + "|" + username + "|" + fileName + "|" + size + "|" + mime);
             h.out.write(data);
             h.out.flush();
         }
-        send("OK|SENT|" + (isImage ? "IMAGE" : "FILE") + "|" + fileName);
-        return;
+
+        send("OK|SENT|" + type + "|" + fileName);
     }
-
-    // ALL / USER: dùng pipeline cũ lưu DB + broadcast theo convId
-    String type = isImage ? "IMAGE" : "FILE";
-
-    String storagePath = FileUtil.saveBytesToUploads(fileName, data);
-    byte[] hash = FileUtil.sha256(data);
-
-    long messageId = msgService.saveMessage(convId, userId, type, fileName);
-    attService.saveAttachment(messageId, fileName, mime, size, storagePath, hash);
-
-    List<String> members = convService.listMemberUsernames(convId);
-    for (String u : members) {
-        ClientHandler h = onlineUsers.get(u);
-        if (h == null) continue;
-
-        h.send(type + "_INCOMING|" + convId + "|" + username + "|" + fileName + "|" + size + "|" + mime);
-        h.out.write(data);
-        h.out.flush();
-    }
-
-    send("OK|SENT|" + type + "|" + fileName);
-}
-
 
     private void handleCommand(String raw) throws Exception {
         raw = raw == null ? "" : raw.trim();
@@ -253,6 +309,34 @@ public class ClientHandler extends Thread {
         }
         if (raw.startsWith("FILETO|") || raw.startsWith("IMAGETO|")) {
             handleSendToAttachment(raw);
+            return;
+        }
+
+        // ===== ATTACH_GET|messageId (client fetch attachment bytes for history) =====
+        if (raw.startsWith("ATTACH_GET|")) {
+            long mid;
+            try {
+                mid = Long.parseLong(raw.substring("ATTACH_GET|".length()).trim());
+            } catch (Exception e) {
+                send("ERR|Bad ATTACH_GET");
+                return;
+            }
+            AttachmentService.AttachmentMeta meta = attService.getAttachmentMeta(mid);
+            if (meta == null || meta.storagePath == null) {
+                send("ERR|ATTACH_NOT_FOUND|" + mid);
+                return;
+            }
+            java.nio.file.Path path = java.nio.file.Paths.get(meta.storagePath);
+            byte[] data;
+            try {
+                data = java.nio.file.Files.readAllBytes(path);
+            } catch (Exception ex) {
+                send("ERR|ATTACH_READ_FAIL|" + mid);
+                return;
+            }
+            send("ATTACH_DATA|" + mid + "|" + meta.fileName + "|" + data.length + "|" + meta.mimeType);
+            out.write(data);
+            out.flush();
             return;
         }
 
@@ -344,12 +428,24 @@ public class ClientHandler extends Thread {
             if (p.length < 4) { send("ERR|Bad HISTORY|GROUP|gid|limit"); return; }
 
             String gid = p[2].trim();
-            Group g = groups.get(gid);
-            if (g == null) { send("ERR|Group not found"); return; }
-            if (!g.members.contains(username)) { send("ERR|Not a member"); return; }
+            int limit = parseLimitSafe(p[3].trim(), 50);
 
-            // in-memory group -> no DB history
-            send("HISTORY|GROUP|" + gid + "|\n");
+            // ✅ lấy convId từ DB
+            Long convId = msgService.getGroupConvId(gid);
+            if (convId == null) {
+                send("HISTORY|GROUP|" + gid + "|\n");
+                return;
+            }
+
+            // ✅ check member DB
+            if (!msgService.isUserInGroup(userId, gid)) {
+                send("ERR|Not a member");
+                return;
+            }
+
+            String hist = msgService.loadHistory(convId, limit);
+            if (hist == null) hist = "";
+            send("HISTORY|GROUP|" + gid + "|\n" + hist);
             return;
         }
 
@@ -358,7 +454,20 @@ public class ClientHandler extends Thread {
             String name = raw.substring("GROUP_CREATE|".length()).trim();
             if (name.isEmpty()) { send("ERR|Missing group name"); return; }
 
-            String gid = "g" + groupSeq.getAndIncrement();
+            String gid = msgService.nextGid();
+
+
+            // ✅ 1) tạo conversation DB cho group
+            long convId = convService.createGroupConversation(name, userId);
+
+            // ✅ 2) insert Groups(gid,name,convId,createdBy)
+            msgService.createGroup(gid, name, convId, userId);
+
+            // ✅ 3) add creator vào ConversationMembers + GroupMembers
+            convService.addMemberIfNotExists(convId, userId, true);
+            msgService.addGroupMemberByGid(gid, userId);
+
+            // optional: in-memory cho list UI
             Group g = new Group(gid, name);
             g.members.add(username);
             groups.put(gid, g);
@@ -370,10 +479,19 @@ public class ClientHandler extends Thread {
 
         if (raw.startsWith("GROUP_JOIN|")) {
             String gid = raw.substring("GROUP_JOIN|".length()).trim();
-            Group g = groups.get(gid);
-            if (g == null) { send("ERR|Group not found"); return; }
+            if (gid.isEmpty()) { send("ERR|Missing gid"); return; }
 
+            Long convId = msgService.getGroupConvId(gid);
+            if (convId == null) { send("ERR|Group not found"); return; }
+
+            // ✅ add DB
+            convService.addMemberIfNotExists(convId, userId, false);
+            msgService.addGroupMemberByGid(gid, userId);
+
+            // optional: in-memory
+            Group g = groups.computeIfAbsent(gid, k -> new Group(gid, gid));
             g.members.add(username);
+
             send("OK|GROUP_JOIN|" + gid);
             sendGroupsState();
             return;
@@ -389,7 +507,7 @@ public class ClientHandler extends Thread {
             if ("ALL".equals(type)) {
                 String content = p[2];
                 if (allConvId > 0) msgService.saveMessage(allConvId, userId, "TEXT", content);
-                broadcast("IN|ALL|" + username + "|" + content, null);
+                broadcast("IN|ALL|" + username + "|" + content, username);
                 return;
             }
 
@@ -427,17 +545,25 @@ public class ClientHandler extends Thread {
                 String gid = p[2].trim();
                 String content = p[3];
 
-                Group g = groups.get(gid);
-                if (g == null) { send("ERR|Group not found"); return; }
-                if (!g.members.contains(username)) { send("ERR|Not a member"); return; }
+                // 1) lấy convId của group từ DB
+                Long convId = msgService.getGroupConvId(gid);
+                if (convId == null) { send("ERR|GROUP|NOT_FOUND"); return; }
 
-                // ✅ group does NOT apply block (as requested)
-                for (String mem : g.members) {
+                // ✅ check membership DB
+                if (!msgService.isUserInGroup(userId, gid)) { send("ERR|Not a member"); return; }
+
+                // 2) LƯU DB
+                msgService.saveMessage(convId, userId, "TEXT", content);
+
+                // 3) realtime: lấy member từ DB
+                List<String> members = msgService.listGroupMemberUsernames(gid);
+                for (String mem : members) {
+                    if (mem.equalsIgnoreCase(username)) continue; // chống lặp
                     ClientHandler h = onlineUsers.get(mem);
-                    if (h == null) continue;
-                    h.send("IN|GROUP|" + gid + "|" + username + "|" + content);
+                    if (h != null) h.send("IN|GROUP|" + gid + "|" + username + "|" + content);
                 }
-                return;
+
+                return; // ✅ không rớt xuống ERR
             }
 
             send("ERR|MSG type not supported");
@@ -490,7 +616,7 @@ public class ClientHandler extends Thread {
 
         if ("TO:ALL".equals(to)) {
             if (allConvId > 0) msgService.saveMessage(allConvId, userId, "TEXT", content);
-            broadcast("IN|ALL|" + username + "|" + content, null);
+            broadcast("IN|ALL|" + username + "|" + content, username);
             return;
         }
 
@@ -556,8 +682,11 @@ public class ClientHandler extends Thread {
         String storagePath = FileUtil.saveBytesToUploads(fileName, data);
         byte[] hash = FileUtil.sha256(data);
 
-        long messageId = msgService.saveMessage(convId, userId, type, fileName);
+        msgService.saveMessage(convId, userId, type, fileName);
+
+        long messageId = msgService.getLastMessageId(convId, userId);
         attService.saveAttachment(messageId, fileName, mime, size, storagePath, hash);
+
 
         List<String> members = convService.listMemberUsernames(convId);
         for (String u : members) {
@@ -593,15 +722,31 @@ public class ClientHandler extends Thread {
     }
 
     private void sendGroupsState() throws Exception {
-        StringBuilder sb = new StringBuilder();
-        for (Group g : groups.values()) {
-            if (username == null) continue;
-            if (!g.members.contains(username)) continue;
-            if (sb.length() > 0) sb.append(",");
-            sb.append(g.id).append(":").append(g.name);
+    String sql =
+        "SELECT g.Gid, g.Name " +
+        "FROM dbo.Groups g " +
+        "JOIN dbo.GroupMembers gm ON gm.GroupId = g.GroupId " +
+        "WHERE gm.UserId = ?";
+
+    StringBuilder sb = new StringBuilder();
+
+    try (Connection c = Db.getConnection();
+         PreparedStatement ps = c.prepareStatement(sql)) {
+
+        ps.setInt(1, userId);
+        try (ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                if (sb.length() > 0) sb.append(",");
+                sb.append(rs.getString("Gid"))
+                  .append(":")
+                  .append(rs.getString("Name"));
+            }
         }
-        send("GROUPS|" + sb);
     }
+
+    send("GROUPS|" + sb);
+}
+
 
     public void send(String message) throws Exception {
         out.writeUTF(message);
@@ -629,4 +774,27 @@ public class ClientHandler extends Thread {
             socket.close();
         } catch (Exception ignored) {}
     }
+    private void sendGroupsForUser(int userId) throws Exception {
+    String sql =
+        "SELECT g.Gid " +
+        "FROM Groups g " +
+        "JOIN GroupMembers gm ON gm.GroupId = g.GroupId " +
+        "WHERE gm.UserId = ?";
+
+    List<String> list = new ArrayList<>();
+
+    try (Connection c = Db.getConnection();
+         PreparedStatement ps = c.prepareStatement(sql)) {
+
+        ps.setInt(1, userId);
+        try (ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                list.add(rs.getString(1));
+            }
+        }
+    }
+
+    send("GROUPS|" + String.join(",", list));
+}
+
 }
