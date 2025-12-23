@@ -230,7 +230,8 @@ public class UserListPanel extends JPanel {
 
     public void setUserOnline(String username, boolean online) {
         if (username == null || username.isBlank()) return;
-        if (username.equals(ClientContext.username)) return;
+        if (username.equals(ClientContext.username)) 
+            return;
 
         presence.put(username, online);
 

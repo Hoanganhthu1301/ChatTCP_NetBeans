@@ -27,6 +27,7 @@ public class ClientContext {
     public static volatile String currentChatKey = "ALL";
 
     public static ConcurrentHashMap<String, StringBuilder> history = new ConcurrentHashMap<>();
+    static String currentChatPeer;
 
     public static StringBuilder getHistory(String key) {
         return history.computeIfAbsent(key, k -> new StringBuilder());

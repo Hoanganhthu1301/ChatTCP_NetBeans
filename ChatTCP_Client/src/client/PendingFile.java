@@ -16,6 +16,7 @@ public class PendingFile {
     public final String from;
     public final String mime;
     public final byte[] data;
+    public String sender; 
 
     public PendingFile(long id, String fileName, String from, String mime, byte[] data) {
         this.id = id;

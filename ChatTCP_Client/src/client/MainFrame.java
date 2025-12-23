@@ -11,12 +11,15 @@ import java.awt.Container;
  *
  * @author hoang
  */
+
 public class MainFrame extends javax.swing.JFrame {
     
     private static final java.util.logging.Logger logger = java.util.logging.Logger.getLogger(MainFrame.class.getName());
     private LoginPanel loginPanel;
     private UserListPanel userListPanel;
     private ChatPanel chatPanel;
+
+
 
     /**
      * Creates new form MainFrame
@@ -38,15 +41,42 @@ public class MainFrame extends javax.swing.JFrame {
     ((CardLayout) getContentPane().getLayout()).show(getContentPane(), "LOGIN");
 
     setLocationRelativeTo(null);
+    ForgotPasswordPanel forgot = new ForgotPasswordPanel(this);
+    add(forgot, "FORGOT");
+
+}
+
+public void showForgotPassword() {
+    showScreen("FORGOT");
+}
+
+// ReceiverThread đã xử lý hết message. Giữ stub để khỏi compile error nếu file khác còn gọi.
+public void onServerMessage(String msg) {
+    System.out.println("MAIN<< " + msg);
 }
 
 
 
 
-    public void showScreen(String name) {
+
+public void showScreen(String name) {
+    java.awt.LayoutManager lm = getContentPane().getLayout();
+    if (!(lm instanceof CardLayout)) {
+        // nếu bị ai đó đổi layout (BorderLayout), set lại CardLayout
+        getContentPane().setLayout(new CardLayout());
+    }
     CardLayout cl = (CardLayout) getContentPane().getLayout();
     cl.show(getContentPane(), name);
 }
+
+public void onLoginSuccess() {
+    showScreen("USERS");
+}
+public void showLogin() {
+    showScreen("LOGIN");
+}
+
+
     public ChatPanel getChatPanel() { return chatPanel; }
     public UserListPanel getUserListPanel() { return userListPanel; }
     public LoginPanel getLoginPanel() { return loginPanel; }
@@ -99,6 +129,7 @@ public class MainFrame extends javax.swing.JFrame {
         /* Create and display the form */
         java.awt.EventQueue.invokeLater(() -> new MainFrame().setVisible(true));
     }
+
 
     
 
