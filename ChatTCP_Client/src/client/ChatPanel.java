@@ -27,6 +27,8 @@ public class ChatPanel extends JPanel {
     private JButton btnBlock;
     private JButton btnSendImage;
     private JButton btnSendFile;
+    private JButton btnSticker;
+
 
     // blocked banner
     private JPanel blockedBar;
@@ -69,11 +71,15 @@ public class ChatPanel extends JPanel {
         JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
         right.setOpaque(false);
         btnBlock = new JButton("Chặn");
+        btnSticker = new JButton("Sticker");
         btnSendImage = new JButton("Gửi ảnh");
         btnSendFile = new JButton("Gửi file");
+
         right.add(btnBlock);
+        right.add(btnSticker);
         right.add(btnSendImage);
         right.add(btnSendFile);
+
 
         top.add(btnBack, BorderLayout.WEST);
         top.add(lblHeader, BorderLayout.CENTER);
@@ -129,6 +135,18 @@ public class ChatPanel extends JPanel {
 
         btnSendFile.addActionListener(e -> doSendFile(false));
         btnSendImage.addActionListener(e -> doSendFile(true));
+        btnSticker.addActionListener(e -> {
+    System.out.println("CLICK STICKER"); // test trước
+    System.out.println("CLICK STICKER");
+    JFrame owner = (JFrame) SwingUtilities.getWindowAncestor(this);
+
+    StickerPickerDialog dlg = new StickerPickerDialog(owner, (stickerId, file) -> {
+        System.out.println("CHỌN STICKER: " + stickerId + " - " + file.getPath());
+        doSendSticker(file); // ✅ GỬI THẬT
+    });
+    dlg.setVisible(true);
+});
+
     }
 
     public void setHeader(String s) {
@@ -240,7 +258,16 @@ public class ChatPanel extends JPanel {
             } else if ("FILE".equalsIgnoreCase(m.type)) {
                 addFileBubblePlaceholder(m);
                 requestAttachment(m.messageId);
-            } else {
+            }else if ("STICKER".equalsIgnoreCase(m.type)) {
+                addStickerBubblePlaceholder(m);
+                requestAttachment(m.messageId);
+            
+            } else if ("FILE".equalsIgnoreCase(m.type)) {
+                addFileBubblePlaceholder(m);
+                requestAttachment(m.messageId);
+                }
+
+            else {
                 addTextBubble(m);
             }
             messagesPanel.add(Box.createVerticalStrut(6));
@@ -392,9 +419,15 @@ public class ChatPanel extends JPanel {
     }
 
     /** realtime incoming attachment (server push bytes) */
-    public void appendIncomingAttachment(String scopeKey, String from, long messageId, String fileName, String mime, int size, byte[] data) {
+    public void appendIncomingAttachment(String scopeKey, String from, long messageId, String incomingType, String fileName, String mime, int size, byte[] data) {
+
         // store history like server lines so loadHistory works
-        String type = mime != null && mime.startsWith("image/") ? "IMAGE" : "FILE";
+        String type;
+        if (incomingType != null && incomingType.startsWith("STICKER")) type = "STICKER";
+        else if (mime != null && mime.startsWith("image/")) type = "IMAGE";
+        else type = "FILE";
+
+        
         String keyToStore = scopeKey;
         if (keyToStore == null) {
             // DM fallback
@@ -413,8 +446,14 @@ public class ChatPanel extends JPanel {
         MsgLine m = new MsgLine(messageId, from, type, fileName, nowServerLike());
         m.mine = from != null && from.equalsIgnoreCase(ClientContext.username);
 
-        if ("IMAGE".equals(type)) addImageBubbleFromBytes(m, data);
-        else addFileBubbleFromBytes(m, data, mime);
+        if ("STICKER".equalsIgnoreCase(type)) {
+            addStickerBubbleFromBytes(m, data);      // ✅ giống bên gửi, không viền, không Lưu
+        } else if ("IMAGE".equalsIgnoreCase(type)) {
+            addImageBubbleFromBytes(m, data);        // ảnh vẫn có Lưu
+        } else {
+            addFileBubbleFromBytes(m, data, mime);
+        }
+
 
         messagesPanel.add(Box.createVerticalStrut(6));
         messagesPanel.revalidate();
@@ -429,12 +468,17 @@ public class ChatPanel extends JPanel {
         JLabel imgLabel = midToImageLabel.get(mid);
         if (imgLabel != null && mime != null && mime.startsWith("image/")) {
             ImageIcon icon = new ImageIcon(data);
-            imgLabel.setIcon(new ImageIcon(scaleImage(icon, 240, 240)));
+
+            int max = 240;
+            if ("(sticker)".equals(imgLabel.getText())) max = 160;
+
+            imgLabel.setIcon(new ImageIcon(scaleImage(icon, max, max)));
             imgLabel.setText(null);
             messagesPanel.revalidate();
             messagesPanel.repaint();
             return;
         }
+
 
         JLabel fileLabel = midToFileLabel.get(mid);
         if (fileLabel != null) {
@@ -585,6 +629,140 @@ public class ChatPanel extends JPanel {
             bar.setValue(bar.getMaximum());
         });
     }
+
+    private void doSendSticker(File f) {
+    if (blocked) { Toolkit.getDefaultToolkit().beep(); return; }
+    String key = ClientContext.currentChatKey;
+    if (key == null) return;
+
+    try {
+        String fileName = f.getName();
+        byte[] data = Files.readAllBytes(f.toPath());
+        String mime = guessMime(fileName, true); // sticker coi như image
+
+        long pendingId = System.currentTimeMillis();
+        PendingStore.put(new PendingFile(pendingId, fileName, ClientContext.username, mime, data));
+
+        // ✅ preview sticker ngay (khỏi chờ server)
+        appendOutgoingSticker(key, pendingId, fileName, mime, data);
+
+        String header;
+        if ("ALL".equals(key)) {
+            header = "STICKERTO|ALL|" + fileName + "|" + data.length + "|" + mime;
+        } else if (key.startsWith("USER:")) {
+            String to = key.substring("USER:".length());
+            header = "STICKERTO|USER|" + to + "|" + fileName + "|" + data.length + "|" + mime;
+        } else if (key.startsWith("GROUP:")) {
+            String gid = key.substring("GROUP:".length());
+            header = "STICKERTO|GROUP|" + gid + "|" + fileName + "|" + data.length + "|" + mime;
+        } else {
+            JOptionPane.showMessageDialog(this, "ChatKey không hợp lệ!");
+            return;
+        }
+
+        synchronized (ClientContext.out) {
+            System.out.println("[SEND] " + header);
+
+            ClientContext.out.writeUTF(header);
+            ClientContext.out.flush();
+            ClientContext.out.write(data);
+            ClientContext.out.flush();
+        }
+    } catch (Exception ex) {
+        JOptionPane.showMessageDialog(this, "Gửi sticker thất bại: " + ex.getMessage());
+    }
+}
+
+private void appendOutgoingSticker(String chatKey, long pendingId, String fileName, String mime, byte[] data) {
+    ClientContext.getHistory(chatKey)
+            .append("MSG|").append(pendingId).append("|")
+            .append(ClientContext.username).append("|")
+            .append("STICKER").append("|")
+            .append(fileName).append("|")
+            .append(nowServerLike()).append("\n");
+
+    if (!chatKey.equals(ClientContext.currentChatKey)) return;
+
+    MsgLine m = new MsgLine(pendingId, ClientContext.username, "STICKER", fileName, nowServerLike());
+    m.mine = true;
+
+    addStickerBubbleFromBytes(m, data);
+
+    messagesPanel.add(Box.createVerticalStrut(6));
+    messagesPanel.revalidate();
+    messagesPanel.repaint();
+    scrollToBottom();
+}
+private void addStickerBubbleFromBytes(MsgLine m, byte[] data) {
+    JPanel row = new JPanel(new BorderLayout());
+    row.setOpaque(false);
+
+    JLabel img = new JLabel();
+    img.setOpaque(false);
+
+    try {
+        ImageIcon icon = new ImageIcon(data);
+        img.setIcon(new ImageIcon(scaleImage(icon, 160, 160))); // ✅ sticker nhỏ
+    } catch (Exception ex) {
+        img.setText("(Không render được sticker)");
+        img.setForeground(Color.GRAY);
+    }
+
+    JPanel wrap = new JPanel(new FlowLayout(m.mine ? FlowLayout.RIGHT : FlowLayout.LEFT, 0, 0));
+    wrap.setOpaque(false);
+
+    // ✅ bubble trong suốt, không nút Lưu
+    JPanel bubble = new JPanel(new BorderLayout());
+    bubble.setOpaque(false);
+    bubble.setBorder(new EmptyBorder(2, 6, 2, 6));
+    bubble.add(img, BorderLayout.CENTER);
+
+    if (!m.mine) {
+        JPanel left = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        left.setOpaque(false);
+        left.add(new AvatarCircle(m.sender));
+        left.add(bubble);
+        wrap.add(left);
+        row.add(wrap, BorderLayout.WEST);
+    } else {
+        wrap.add(bubble);
+        row.add(wrap, BorderLayout.EAST);
+    }
+
+    messagesPanel.add(row);
+}
+private void addStickerBubblePlaceholder(MsgLine m) {
+    JPanel row = new JPanel(new BorderLayout());
+    row.setOpaque(false);
+
+    JLabel img = new JLabel("(sticker)");
+    img.setForeground(Color.GRAY);
+    img.setBorder(new EmptyBorder(2, 6, 2, 6));
+
+    JPanel bubble = new JPanel(new BorderLayout());
+    bubble.setOpaque(false);
+    bubble.setBorder(new EmptyBorder(2, 6, 2, 6));
+    bubble.add(img, BorderLayout.CENTER);
+
+    JPanel wrap = new JPanel(new FlowLayout(m.mine ? FlowLayout.RIGHT : FlowLayout.LEFT, 0, 0));
+    wrap.setOpaque(false);
+
+    if (!m.mine) {
+        JPanel left = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        left.setOpaque(false);
+        left.add(new AvatarCircle(m.sender));
+        left.add(bubble);
+        wrap.add(left);
+        row.add(wrap, BorderLayout.WEST);
+    } else {
+        wrap.add(bubble);
+        row.add(wrap, BorderLayout.EAST);
+    }
+
+    midToImageLabel.put(m.messageId, img);
+    messagesPanel.add(row);
+}
+
 
     // =========================
     // PARSE HELPERS
@@ -850,4 +1028,5 @@ public class ChatPanel extends JPanel {
             super.paintComponent(g);
         }
     }
+    
 }

@@ -115,10 +115,15 @@ public class ReceiverThread extends Thread {
                 }
 
                 // ===== REALTIME ATTACHMENTS =====
-                if (msg.startsWith("IMAGE_INCOMING|") || msg.startsWith("FILE_INCOMING|")) {
+           
+                if (msg.startsWith("IMAGE_INCOMING|")
+                        || msg.startsWith("FILE_INCOMING|")
+                        || msg.startsWith("STICKER_INCOMING|")) {
                     handleIncomingAttachment(msg);
                     continue;
                 }
+
+
 
                 // ===== REALTIME TEXT =====
                 if (msg.startsWith("IN|")) {
@@ -239,7 +244,7 @@ public class ReceiverThread extends Thread {
         // FILE_INCOMING|convId|from|fileName|size|mime
         // IMAGE_INCOMING|GROUP|gid|from|fileName|size|mime
         // FILE_INCOMING|GROUP|gid|from|fileName|size|mime
-
+        String incomingType = header.split("\\|", 2)[0]; 
         String[] p = header.split("\\|");
         boolean isGroup = p.length >= 7 && "GROUP".equalsIgnoreCase(p[1]);
 
@@ -282,8 +287,23 @@ public class ReceiverThread extends Thread {
 
         String finalScopeKey = scopeKey;
         long finalMessageId = messageId;
-        SwingUtilities.invokeLater(() -> ClientContext.main.getChatPanel()
-                .appendIncomingAttachment(finalScopeKey, from, finalMessageId, fileName, mime, size, data));
+
+        SwingUtilities.invokeLater(() -> {
+    ClientContext.main.getChatPanel()
+        .appendIncomingAttachment(
+            finalScopeKey,
+            from,
+            finalMessageId,
+            incomingType,
+            fileName,
+            mime,
+            size,
+            data
+        );
+});
+
+
+
     }
 
     private void handleAttachData(String header) throws Exception {
