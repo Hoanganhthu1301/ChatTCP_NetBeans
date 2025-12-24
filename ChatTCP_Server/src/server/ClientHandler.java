@@ -211,6 +211,9 @@ public class ClientHandler extends Thread {
         if (p.length < 5) { send("ERR|Bad FILETO/IMAGETO"); return; }
 
         boolean isImage = p[0].equals("IMAGETO");
+        boolean isSticker = p[0].equals("STICKERTO");
+    
+
         String scope = p[1];
 
         long convId;
@@ -255,7 +258,7 @@ public class ClientHandler extends Thread {
         byte[] data = new byte[size];
         in.readFully(data);
 
-        String type = isImage ? "IMAGE" : "FILE";
+        String type = isSticker ? "STICKER" : (isImage ? "IMAGE" : "FILE");
 
         // ===== LƯU DB (tất cả: ALL/USER/GROUP) =====
         String storagePath = FileUtil.saveBytesToUploads(fileName, data);
@@ -307,10 +310,11 @@ public class ClientHandler extends Thread {
             sendUsersState();
             return;
         }
-        if (raw.startsWith("FILETO|") || raw.startsWith("IMAGETO|")) {
+        if (raw.startsWith("FILETO|") || raw.startsWith("IMAGETO|") || raw.startsWith("STICKERTO|")) {
             handleSendToAttachment(raw);
             return;
         }
+
 
         // ===== ATTACH_GET|messageId (client fetch attachment bytes for history) =====
         if (raw.startsWith("ATTACH_GET|")) {
